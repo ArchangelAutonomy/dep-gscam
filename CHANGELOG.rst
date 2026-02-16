@@ -2,6 +2,12 @@
 Changelog for package gscam
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+Forthcoming
+-----------
+* Replace ament_target_dependencies with target_link_libraries (`#102 <https://github.com/ros-drivers/gscam/issues/102>`_)
+* Shutdown node when pipeline thread finishes (`#86 <https://github.com/ros-drivers/gscam/issues/86>`_)
+* Contributors: Alejandro Hernández Cordero, Jeremy Roy
+
 2.0.2 (2022-06-16)
 ------------------
 * Update ROS2, Ubuntu and GStreamer versions (`#85 <https://github.com/ros-drivers/gscam/issues/85>`_)
