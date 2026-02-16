@@ -2,8 +2,8 @@
 Changelog for package gscam
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Forthcoming
------------
+2.0.4 (2026-02-16)
+------------------
 * fix: update wrong target (`#105 <https://github.com/ros-drivers/gscam/issues/105>`_)
 * fix: rolling build (`#107 <https://github.com/ros-drivers/gscam/issues/107>`_)
 * chore(deps): add gstreamer1.0-plugins-good (`#100 <https://github.com/ros-drivers/gscam/issues/100>`_)
