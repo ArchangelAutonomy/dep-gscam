@@ -2,6 +2,15 @@
 Changelog for package gscam
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+Forthcoming
+-----------
+* fix: update wrong target (`#105 <https://github.com/ros-drivers/gscam/issues/105>`_)
+* fix: rolling build (`#107 <https://github.com/ros-drivers/gscam/issues/107>`_)
+* chore(deps): add gstreamer1.0-plugins-good (`#100 <https://github.com/ros-drivers/gscam/issues/100>`_)
+* chore: remove cv_bridge in package-xml, as it is not used. (`#93 <https://github.com/ros-drivers/gscam/issues/93>`_)
+* ci: update ros distros (`#106 <https://github.com/ros-drivers/gscam/issues/106>`_)
+* Contributors: Bastian Jäger, Daisuke Nishimatsu, Séverin Lemaignan
+
 2.0.3 (2026-02-16)
 ------------------
 * Replace ament_target_dependencies with target_link_libraries (`#102 <https://github.com/ros-drivers/gscam/issues/102>`_)
