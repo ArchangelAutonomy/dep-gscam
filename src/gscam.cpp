@@ -42,7 +42,7 @@ GSCam::GSCam(const rclcpp::NodeOptions & options)
   gsconfig_(""),
   pipeline_(NULL),
   sink_(NULL),
-  camera_info_manager_(this),
+  camera_info_manager_(this, "camera", ""),
   stop_signal_(false)
 {
   pipeline_thread_ = std::thread(
@@ -257,8 +257,13 @@ bool GSCam::init_stream()
     cinfo_pub_ = create_publisher<sensor_msgs::msg::CameraInfo>(
       "camera/camera_info", qos);
   } else {
+#ifdef USE_OLD_RMW_QOS_IMAGE_TRANSPORT
     camera_pub_ = image_transport::create_camera_publisher(
       this, "camera/image_raw", qos.get_rmw_qos_profile());
+#else
+    camera_pub_ = image_transport::create_camera_publisher(
+      *this, "camera/image_raw", qos);
+#endif
   }
 
   return true;
