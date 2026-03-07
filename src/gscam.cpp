@@ -31,6 +31,7 @@ extern "C" {
 #include "sensor_msgs/msg/compressed_image.hpp"
 #include "sensor_msgs/msg/camera_info.hpp"
 #include "sensor_msgs/image_encodings.hpp"
+#include "std_msgs/msg/header.hpp"
 
 #include "gscam/gscam.hpp"
 
@@ -43,7 +44,8 @@ GSCam::GSCam(const rclcpp::NodeOptions & options)
   pipeline_(NULL),
   sink_(NULL),
   camera_info_manager_(this),
-  stop_signal_(false)
+  stop_signal_(false),
+  diag_updater_(this)
 {
   pipeline_thread_ = std::thread(
     [this]()
@@ -266,6 +268,22 @@ bool GSCam::init_stream()
       this, "camera/image_raw", qos.get_rmw_qos_profile());
   }
 
+  // Heartbeat
+  heartbeat_pub_ = create_publisher<std_msgs::msg::Header>("~/heartbeat", rclcpp::QoS{1});
+  heartbeat_timer_ = create_wall_timer(
+    std::chrono::seconds(1),
+    [this]() {
+      std_msgs::msg::Header msg;
+      msg.stamp = now();
+      msg.frame_id = frame_id_;
+      heartbeat_pub_->publish(msg);
+    });
+
+  // Diagnostics
+  diagnostic_updater::FrequencyStatusParam freq_params{&diag_min_freq_, &diag_max_freq_};
+  img_freq_diag_ = std::make_unique<diagnostic_updater::TopicDiagnostic>(
+    "Image pub rate", diag_updater_, freq_params, diagnostic_updater::DefaultTimeStampStatusParam);
+
   return true;
 }
 
@@ -412,6 +430,8 @@ void GSCam::publish_stream()
       // Publish the image/info
       camera_pub_.publish(img, cinfo);
     }
+
+    img_freq_diag_->tick(cinfo->header.stamp);
 
     // Release the buffer
     if (buf) {

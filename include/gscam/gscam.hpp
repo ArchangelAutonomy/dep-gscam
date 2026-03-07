@@ -32,6 +32,9 @@ extern "C" {
 #include "sensor_msgs/msg/compressed_image.hpp"
 #include "sensor_msgs/msg/camera_info.hpp"
 #include "sensor_msgs/srv/set_camera_info.hpp"
+#include "std_msgs/msg/header.hpp"
+#include "diagnostic_updater/diagnostic_updater.hpp"
+#include "diagnostic_updater/publisher.hpp"
 
 namespace gscam
 {
@@ -81,6 +84,16 @@ private:
   // Case of a jpeg only publisher
   rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr jpeg_pub_;
   rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr cinfo_pub_;
+
+  // Heartbeat
+  rclcpp::Publisher<std_msgs::msg::Header>::SharedPtr heartbeat_pub_;
+  rclcpp::TimerBase::SharedPtr heartbeat_timer_;
+
+  // Diagnostics
+  diagnostic_updater::Updater diag_updater_;
+  double diag_min_freq_{1.0};
+  double diag_max_freq_{120.0};
+  std::unique_ptr<diagnostic_updater::TopicDiagnostic> img_freq_diag_;
 
   // Poll gstreamer on a separate thread
   std::thread pipeline_thread_;

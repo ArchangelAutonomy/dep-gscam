@@ -14,6 +14,8 @@ find_package(image_transport REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_components REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(diagnostic_updater REQUIRED)
 find_package(camera_calibration_parsers REQUIRED)
 find_package(camera_info_manager REQUIRED)
 
@@ -33,6 +35,8 @@ ament_target_dependencies(gscam
   "rclcpp"
   "rclcpp_components"
   "sensor_msgs"
+  "std_msgs"
+  "diagnostic_updater"
   "camera_calibration_parsers"
   "camera_info_manager")
 
