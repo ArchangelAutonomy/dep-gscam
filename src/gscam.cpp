@@ -106,6 +106,9 @@ bool GSCam::configure()
   camera_info_url_ = declare_parameter("camera_info_url", "");
   camera_name_ = declare_parameter("camera_name", "");
 
+  diag_min_freq_ = declare_parameter("camera_expected_min_fps", 13.0);
+  diag_max_freq_ = declare_parameter("camera_expected_max_fps", 17.0);
+
   // Get the image encoding
   image_encoding_ =
     declare_parameter("image_encoding", std::string(sensor_msgs::image_encodings::RGB8));

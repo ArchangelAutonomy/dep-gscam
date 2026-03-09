@@ -74,6 +74,9 @@ private:
   std::string camera_info_url_;
   bool use_sensor_data_qos_;
 
+  double camera_expected_min_fps_;
+  double camera_expected_max_fps_;
+
   // ROS Inteface
   // Calibration between ros::Time and gst timestamps
   uint64_t time_offset_;
@@ -91,8 +94,8 @@ private:
 
   // Diagnostics
   diagnostic_updater::Updater diag_updater_;
-  double diag_min_freq_{1.0};
-  double diag_max_freq_{120.0};
+  double diag_min_freq_;
+  double diag_max_freq_;
   std::unique_ptr<diagnostic_updater::TopicDiagnostic> img_freq_diag_;
 
   // Poll gstreamer on a separate thread
