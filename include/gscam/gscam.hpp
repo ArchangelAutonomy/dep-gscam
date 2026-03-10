@@ -74,9 +74,6 @@ private:
   std::string camera_info_url_;
   bool use_sensor_data_qos_;
 
-  double camera_expected_min_fps_;
-  double camera_expected_max_fps_;
-
   // ROS Inteface
   // Calibration between ros::Time and gst timestamps
   uint64_t time_offset_;
