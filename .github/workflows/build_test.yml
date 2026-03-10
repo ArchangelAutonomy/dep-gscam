@@ -15,25 +15,24 @@ jobs:
       fail-fast: false
       matrix:
         ros_distribution:
-          - foxy
-          - galactic
           - humble
+          - jazzy
+          - kilted
           - rolling
         include:
-          # Foxy Fitzroy (June 2020 - May 2023)
-          - docker_image: rostooling/setup-ros-docker:ubuntu-focal-ros-foxy-ros-base-latest
-            ros_distribution: foxy
-            ros_version: 2
-          # Galactic Geochelone (May 2021 - November 2022)
-          - docker_image: rostooling/setup-ros-docker:ubuntu-focal-ros-galactic-ros-base-latest
-            ros_distribution: galactic
-            ros_version: 2
           # Humble Hawksbill (May 2022 - May 2027)
-          - docker_image: rostooling/setup-ros-docker:ubuntu-jammy-ros-humble-ros-base-latest
-            ros_distribution: humble
+          - docker_image: ghcr.io/sloretz/ros:humble-ros-base
+            ros_version: 2
+          # Jazzy Jalisco (May 2024 - May 2029)
+          - docker_image: ghcr.io/sloretz/ros:jazzy-ros-base
+            ros_distribution: jazzy
+            ros_version: 2
+          # Kilted Kaiju (May 2025 - December 2026)
+          - docker_image: ghcr.io/sloretz/ros:kilted-ros-base
+            ros_distribution: kilted
             ros_version: 2
           # Rolling Ridley  (June 2020 - Present)
-          - docker_image: rostooling/setup-ros-docker:ubuntu-jammy-ros-rolling-ros-base-latest
+          - docker_image: ghcr.io/sloretz/ros:rolling-ros-base 
             ros_distribution: rolling
             ros_version: 2
     container:
@@ -42,16 +41,13 @@ jobs:
       - name: setup directories
         run: mkdir -p ros_ws/src
       - name: checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v6
         with:
           path: ros_ws/src
-      - name: workaround for jammy
-        if: ${{ matrix.ros_distribution == 'humble' || matrix.ros_distribution == 'rolling' }}
-        run: |
-          sudo apt remove libunwind-14-dev -y
       - name: build and test
         uses: ros-tooling/action-ros-ci@master
         with:
           package-name: gscam
           target-ros2-distro: ${{ matrix.ros_distribution }}
           vcs-repo-file-url: ""
+          coverage-result: false
