@@ -108,6 +108,7 @@ bool GSCam::configure()
 
   diag_min_freq_ = declare_parameter("camera_expected_min_fps", 13.0);
   diag_max_freq_ = declare_parameter("camera_expected_max_fps", 17.0);
+  diag_updater_.setHardwareID(declare_parameter("hardware_id", "unknown"));
 
   // Get the image encoding
   image_encoding_ =
