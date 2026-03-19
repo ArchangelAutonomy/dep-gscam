@@ -41,6 +41,7 @@ namespace gscam
 GSCam::GSCam(const rclcpp::NodeOptions & options)
 : rclcpp::Node("gscam_publisher", options),
   gsconfig_(""),
+  udp_streaming_enabled_(false),
   pipeline_(NULL),
   sink_(NULL),
   camera_info_manager_(this, "camera", ""),
@@ -147,6 +148,32 @@ bool GSCam::configure()
   param_desc.description = "Time offset [seconds] between gst_timestamps and camera shutter.";
   acquisition_offset_ = declare_parameter<int64_t>("acquisition_offset", 0, param_desc);
 
+  // UDP streaming: when udp_stream_config is non-empty, a tee is inserted so the camera
+  // source feeds both a ROS appsink and a hardware-encoded UDP stream simultaneously.
+  // - gscam_config       : source pipeline up to (but not including) the tee
+  // - ros_branch_config  : pipeline from the tee output to just before appsink
+  //                        (e.g. "nvvidconv flip-method=0 ! video/x-raw,format=BGRx ! videoconvert")
+  // - udp_stream_config  : full pipeline from the tee output to udpsink
+  //                        (e.g. "nvv4l2h264enc insert-sps-pps=true ! h264parse ! rtph264pay pt=96
+  //                               ! udpsink host=192.168.1.100 port=5000")
+  udp_stream_config_ = declare_parameter("udp_stream_config", "");
+  ros_branch_config_ = declare_parameter("ros_branch_config", "");
+  udp_streaming_enabled_ = !udp_stream_config_.empty();
+
+  if (udp_streaming_enabled_ && ros_branch_config_.empty()) {
+    RCLCPP_FATAL(
+      get_logger(),
+      "'ros_branch_config' must be set when 'udp_stream_config' is set. "
+      "It is the pipeline segment from the tee to the appsink (ROS branch).");
+    return false;
+  }
+
+  if (udp_streaming_enabled_) {
+    RCLCPP_INFO_STREAM(get_logger(), "UDP streaming enabled.");
+    RCLCPP_INFO_STREAM(get_logger(), "  ros_branch_config: " << ros_branch_config_);
+    RCLCPP_INFO_STREAM(get_logger(), "  udp_stream_config: " << udp_stream_config_);
+  }
+
   return true;
 }
 
@@ -162,84 +189,136 @@ bool GSCam::init_stream()
 
   GError * error = 0;  // Assignment to zero is a gst requirement
 
-  pipeline_ = gst_parse_launch(gsconfig_.c_str(), &error);
-  if (pipeline_ == NULL) {
-    RCLCPP_FATAL_STREAM(get_logger(), error->message);
-    return false;
-  }
+  if (udp_streaming_enabled_) {
+    // Build a single pipeline with a tee: one branch feeds the ROS appsink,
+    // the other runs the hardware encoder and UDP sink.
+    //
+    // Full pipeline structure:
+    //   {gscam_config} ! tee name=_xnaut_tee_
+    //     _xnaut_tee_. ! queue ! {ros_branch_config} ! appsink name=_xnaut_appsink_
+    //     _xnaut_tee_. ! queue ! {udp_stream_config}
+    std::string full_pipeline =
+      gsconfig_ +
+      " ! tee name=_xnaut_tee_"
+      " _xnaut_tee_. ! queue ! " + ros_branch_config_ +
+      " ! appsink name=_xnaut_appsink_"
+      " _xnaut_tee_. ! queue ! " + udp_stream_config_;
 
-  // Create RGB sink
-  sink_ = gst_element_factory_make("appsink", NULL);
-  GstCaps * caps = gst_app_sink_get_caps(GST_APP_SINK(sink_));
+    RCLCPP_INFO_STREAM(get_logger(), "Full tee pipeline: " << full_pipeline);
 
-  // http://gstreamer.freedesktop.org/data/doc/gstreamer/head/pwg/html/section-types-definitions.html
-  if (image_encoding_ == sensor_msgs::image_encodings::RGB8) {
-    caps = gst_caps_new_simple(
-      "video/x-raw",
-      "format", G_TYPE_STRING, "RGB",
-      NULL);
-  } else if (image_encoding_ == sensor_msgs::image_encodings::MONO8) {
-    caps = gst_caps_new_simple(
-      "video/x-raw",
-      "format", G_TYPE_STRING, "GRAY8",
-      NULL);
-  } else if (image_encoding_ == sensor_msgs::image_encodings::YUV422) {
-    caps = gst_caps_new_simple(
-      "video/x-raw",
-      "format", G_TYPE_STRING, "UYVY",
-      NULL);
-  } else if (image_encoding_ == "jpeg") {
-    caps = gst_caps_new_simple("image/jpeg", NULL, NULL);
-  }
-
-  gst_app_sink_set_caps(GST_APP_SINK(sink_), caps);
-  gst_caps_unref(caps);
-
-  // Set whether the sink should sync
-  // Sometimes setting this to true can cause a large number of frames to be
-  // dropped
-  gst_base_sink_set_sync(
-    GST_BASE_SINK(sink_),
-    (sync_sink_) ? TRUE : FALSE);
-
-  if (GST_IS_PIPELINE(pipeline_)) {
-    GstPad * outpad = gst_bin_find_unlinked_pad(GST_BIN(pipeline_), GST_PAD_SRC);
-    g_assert(outpad);
-
-    GstElement * outelement = gst_pad_get_parent_element(outpad);
-    g_assert(outelement);
-    gst_object_unref(outpad);
-
-    if (!gst_bin_add(GST_BIN(pipeline_), sink_)) {
-      RCLCPP_FATAL(get_logger(), "gst_bin_add() failed");
-      gst_object_unref(outelement);
-      gst_object_unref(pipeline_);
+    pipeline_ = gst_parse_launch(full_pipeline.c_str(), &error);
+    if (pipeline_ == NULL) {
+      RCLCPP_FATAL_STREAM(get_logger(), error->message);
       return false;
     }
 
-    if (!gst_element_link(outelement, sink_)) {
-      RCLCPP_FATAL(
-        get_logger(), "GStreamer: cannot link outelement(\"%s\") -> sink\n",
-        gst_element_get_name(outelement));
-      gst_object_unref(outelement);
+    // gst_bin_get_by_name adds an extra ref; released in cleanup_stream()
+    sink_ = gst_bin_get_by_name(GST_BIN(pipeline_), "_xnaut_appsink_");
+    if (!sink_) {
+      RCLCPP_FATAL(get_logger(), "Failed to find appsink element in tee pipeline");
       gst_object_unref(pipeline_);
+      pipeline_ = NULL;
       return false;
     }
 
-    gst_object_unref(outelement);
+    // Set caps and sync on the appsink
+    GstCaps * caps = NULL;
+    // http://gstreamer.freedesktop.org/data/doc/gstreamer/head/pwg/html/section-types-definitions.html
+    if (image_encoding_ == sensor_msgs::image_encodings::RGB8) {
+      caps = gst_caps_new_simple("video/x-raw", "format", G_TYPE_STRING, "RGB", NULL);
+    } else if (image_encoding_ == sensor_msgs::image_encodings::MONO8) {
+      caps = gst_caps_new_simple("video/x-raw", "format", G_TYPE_STRING, "GRAY8", NULL);
+    } else if (image_encoding_ == sensor_msgs::image_encodings::YUV422) {
+      caps = gst_caps_new_simple("video/x-raw", "format", G_TYPE_STRING, "UYVY", NULL);
+    } else if (image_encoding_ == "jpeg") {
+      caps = gst_caps_new_simple("image/jpeg", NULL, NULL);
+    }
+    if (caps) {
+      gst_app_sink_set_caps(GST_APP_SINK(sink_), caps);
+      gst_caps_unref(caps);
+    }
+    gst_base_sink_set_sync(GST_BASE_SINK(sink_), sync_sink_ ? TRUE : FALSE);
   } else {
-    GstElement * launchpipe = pipeline_;
-    pipeline_ = gst_pipeline_new(NULL);
-    g_assert(pipeline_);
-
-    gst_object_unparent(GST_OBJECT(launchpipe));
-
-    gst_bin_add_many(GST_BIN(pipeline_), launchpipe, sink_, NULL);
-
-    if (!gst_element_link(launchpipe, sink_)) {
-      RCLCPP_FATAL(get_logger(), "GStreamer: cannot link launchpipe -> sink");
-      gst_object_unref(pipeline_);
+    // Existing behavior: parse the user's pipeline and programmatically append appsink
+    pipeline_ = gst_parse_launch(gsconfig_.c_str(), &error);
+    if (pipeline_ == NULL) {
+      RCLCPP_FATAL_STREAM(get_logger(), error->message);
       return false;
+    }
+
+    // Create RGB sink
+    sink_ = gst_element_factory_make("appsink", NULL);
+    GstCaps * caps = gst_app_sink_get_caps(GST_APP_SINK(sink_));
+
+    // http://gstreamer.freedesktop.org/data/doc/gstreamer/head/pwg/html/section-types-definitions.html
+    if (image_encoding_ == sensor_msgs::image_encodings::RGB8) {
+      caps = gst_caps_new_simple(
+        "video/x-raw",
+        "format", G_TYPE_STRING, "RGB",
+        NULL);
+    } else if (image_encoding_ == sensor_msgs::image_encodings::MONO8) {
+      caps = gst_caps_new_simple(
+        "video/x-raw",
+        "format", G_TYPE_STRING, "GRAY8",
+        NULL);
+    } else if (image_encoding_ == sensor_msgs::image_encodings::YUV422) {
+      caps = gst_caps_new_simple(
+        "video/x-raw",
+        "format", G_TYPE_STRING, "UYVY",
+        NULL);
+    } else if (image_encoding_ == "jpeg") {
+      caps = gst_caps_new_simple("image/jpeg", NULL, NULL);
+    }
+
+    gst_app_sink_set_caps(GST_APP_SINK(sink_), caps);
+    gst_caps_unref(caps);
+
+    // Set whether the sink should sync
+    // Sometimes setting this to true can cause a large number of frames to be
+    // dropped
+    gst_base_sink_set_sync(
+      GST_BASE_SINK(sink_),
+      (sync_sink_) ? TRUE : FALSE);
+
+    if (GST_IS_PIPELINE(pipeline_)) {
+      GstPad * outpad = gst_bin_find_unlinked_pad(GST_BIN(pipeline_), GST_PAD_SRC);
+      g_assert(outpad);
+
+      GstElement * outelement = gst_pad_get_parent_element(outpad);
+      g_assert(outelement);
+      gst_object_unref(outpad);
+
+      if (!gst_bin_add(GST_BIN(pipeline_), sink_)) {
+        RCLCPP_FATAL(get_logger(), "gst_bin_add() failed");
+        gst_object_unref(outelement);
+        gst_object_unref(pipeline_);
+        return false;
+      }
+
+      if (!gst_element_link(outelement, sink_)) {
+        RCLCPP_FATAL(
+          get_logger(), "GStreamer: cannot link outelement(\"%s\") -> sink\n",
+          gst_element_get_name(outelement));
+        gst_object_unref(outelement);
+        gst_object_unref(pipeline_);
+        return false;
+      }
+
+      gst_object_unref(outelement);
+    } else {
+      GstElement * launchpipe = pipeline_;
+      pipeline_ = gst_pipeline_new(NULL);
+      g_assert(pipeline_);
+
+      gst_object_unparent(GST_OBJECT(launchpipe));
+
+      gst_bin_add_many(GST_BIN(pipeline_), launchpipe, sink_, NULL);
+
+      if (!gst_element_link(launchpipe, sink_)) {
+        RCLCPP_FATAL(get_logger(), "GStreamer: cannot link launchpipe -> sink");
+        gst_object_unref(pipeline_);
+        return false;
+      }
     }
   }
 
@@ -457,6 +536,12 @@ void GSCam::cleanup_stream()
   RCLCPP_INFO(get_logger(), "Stopping gstreamer pipeline...");
   if (pipeline_) {
     gst_element_set_state(pipeline_, GST_STATE_NULL);
+    // In tee mode sink_ carries an extra ref from gst_bin_get_by_name; release it
+    // before the pipeline is destroyed so the refcount reaches zero cleanly.
+    if (udp_streaming_enabled_ && sink_) {
+      gst_object_unref(sink_);
+      sink_ = NULL;
+    }
     gst_object_unref(pipeline_);
     pipeline_ = NULL;
   }

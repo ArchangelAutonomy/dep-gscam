@@ -56,6 +56,13 @@ private:
   // General gstreamer configuration
   std::string gsconfig_;
 
+  // UDP streaming configuration
+  // When set, a tee splits the stream: one branch feeds the ROS appsink,
+  // the other runs through udp_stream_config_ (e.g. hardware encoder + udpsink).
+  bool udp_streaming_enabled_;
+  std::string ros_branch_config_;   // pipeline from tee to appsink (ROS branch)
+  std::string udp_stream_config_;   // pipeline from tee to udpsink (UDP branch)
+
   // Gstreamer structures
   GstElement * pipeline_;
   GstElement * sink_;
