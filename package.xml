@@ -20,6 +20,8 @@
   <depend>libgstreamer1.0-dev</depend>
   <depend>libgstreamer-plugins-base1.0-dev</depend>
   <depend>gstreamer1.0-plugins-good</depend>
+  <!-- Optional: enables RTSP server support (enable_rtsp_stream param) -->
+  <exec_depend>libgstreamer-rtsp-server-1.0-dev</exec_depend>
 
   <depend>class_loader</depend>
   <depend>rclcpp</depend>

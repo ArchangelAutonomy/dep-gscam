@@ -47,6 +47,15 @@ GSCam::GSCam(const rclcpp::NodeOptions & options)
   camera_info_manager_(this, "camera", ""),
   stop_signal_(false),
   diag_updater_(this)
+#ifdef HAVE_GST_RTSP_SERVER
+  , rtsp_streaming_enabled_(false),
+  rtsp_port_(8554),
+  rtsp_appsink_(NULL),
+  rtsp_appsrc_(NULL),
+  rtsp_server_(NULL),
+  rtsp_context_(NULL),
+  rtsp_main_loop_(NULL)
+#endif
 {
   pipeline_thread_ = std::thread(
     [this]()
@@ -174,6 +183,58 @@ bool GSCam::configure()
     RCLCPP_INFO_STREAM(get_logger(), "  udp_stream_config: " << udp_stream_config_);
   }
 
+#ifdef HAVE_GST_RTSP_SERVER
+  // RTSP streaming parameters.
+  // - rtsp_encode_config : tee branch from source to encoded bitstream before the internal
+  //                        appsink (e.g. "nvv4l2h264enc insert-sps-pps=true ! h264parse")
+  // - rtsp_pay_config    : RTP packetizer placed in the RTSP factory pipeline
+  //                        (e.g. "rtph264pay name=pay0 pt=96")
+  // - rtsp_port          : TCP port the RTSP server listens on (default 8554)
+  // - rtsp_mount_point   : URL path where the stream is served (default "/stream")
+  rtsp_encode_config_ = declare_parameter("rtsp_encode_config", "");
+  rtsp_pay_config_ = declare_parameter("rtsp_pay_config", "rtph264pay name=pay0 pt=96");
+  rtsp_port_ = declare_parameter("rtsp_port", 8554);
+  rtsp_mount_point_ = declare_parameter("rtsp_mount_point", "/stream");
+  rtsp_streaming_enabled_ = !rtsp_encode_config_.empty();
+
+  if (rtsp_streaming_enabled_) {
+    RCLCPP_INFO_STREAM(get_logger(), "RTSP streaming enabled.");
+    RCLCPP_INFO_STREAM(get_logger(), "  rtsp_encode_config: " << rtsp_encode_config_);
+    RCLCPP_INFO_STREAM(get_logger(), "  rtsp_pay_config:    " << rtsp_pay_config_);
+    RCLCPP_INFO_STREAM(
+      get_logger(), "  endpoint: rtsp://localhost:" << rtsp_port_ << rtsp_mount_point_);
+  }
+#else
+  // Declare params so they exist even when RTSP is compiled out (avoids unknown-param errors).
+  {
+    const auto rtsp_encode = declare_parameter("rtsp_encode_config", "");
+    declare_parameter("rtsp_pay_config", "rtph264pay name=pay0 pt=96");
+    declare_parameter("rtsp_port", 8554);
+    declare_parameter("rtsp_mount_point", "/stream");
+    if (!rtsp_encode.empty()) {
+      RCLCPP_WARN(
+        get_logger(),
+        "'rtsp_encode_config' is set but this build was compiled without gst-rtsp-server support. "
+        "Install libgstreamer-rtsp-server-1.0-dev and rebuild to enable RTSP.");
+    }
+  }
+#endif
+
+  // A tee is needed whenever any secondary output branch is active.
+  // ros_branch_config is required in that case.
+  const bool need_tee = udp_streaming_enabled_
+#ifdef HAVE_GST_RTSP_SERVER
+    || rtsp_streaming_enabled_
+#endif
+  ;
+  if (need_tee && ros_branch_config_.empty()) {
+    RCLCPP_FATAL(
+      get_logger(),
+      "'ros_branch_config' must be set when any secondary stream (UDP or RTSP) is enabled. "
+      "It is the pipeline segment from the tee to the ROS appsink.");
+    return false;
+  }
+
   return true;
 }
 
@@ -189,20 +250,38 @@ bool GSCam::init_stream()
 
   GError * error = 0;  // Assignment to zero is a gst requirement
 
-  if (udp_streaming_enabled_) {
-    // Build a single pipeline with a tee: one branch feeds the ROS appsink,
-    // the other runs the hardware encoder and UDP sink.
+  const bool need_tee = udp_streaming_enabled_
+#ifdef HAVE_GST_RTSP_SERVER
+    || rtsp_streaming_enabled_
+#endif
+  ;
+
+  if (need_tee) {
+    // Build a single pipeline with a tee so the camera source is opened only once.
+    // Each active output gets its own queue-decoupled branch.
     //
     // Full pipeline structure:
     //   {gscam_config} ! tee name=_xnaut_tee_
     //     _xnaut_tee_. ! queue ! {ros_branch_config} ! appsink name=_xnaut_appsink_
-    //     _xnaut_tee_. ! queue ! {udp_stream_config}
+    //     _xnaut_tee_. ! queue ! {udp_stream_config}                         (if UDP)
+    //     _xnaut_tee_. ! queue ! {rtsp_encode_config} ! appsink name=_xnaut_rtsp_appsink_  (if RTSP)
     std::string full_pipeline =
       gsconfig_ +
       " ! tee name=_xnaut_tee_"
       " _xnaut_tee_. ! queue ! " + ros_branch_config_ +
-      " ! appsink name=_xnaut_appsink_"
-      " _xnaut_tee_. ! queue ! " + udp_stream_config_;
+      " ! appsink name=_xnaut_appsink_";
+
+    if (udp_streaming_enabled_) {
+      full_pipeline += " _xnaut_tee_. ! queue ! " + udp_stream_config_;
+    }
+
+#ifdef HAVE_GST_RTSP_SERVER
+    if (rtsp_streaming_enabled_) {
+      full_pipeline +=
+        " _xnaut_tee_. ! queue ! " + rtsp_encode_config_ +
+        " ! appsink name=_xnaut_rtsp_appsink_ emit-signals=false";
+    }
+#endif
 
     RCLCPP_INFO_STREAM(get_logger(), "Full tee pipeline: " << full_pipeline);
 
@@ -212,16 +291,16 @@ bool GSCam::init_stream()
       return false;
     }
 
-    // gst_bin_get_by_name adds an extra ref; released in cleanup_stream()
+    // gst_bin_get_by_name adds an extra ref; each is released in cleanup_stream()
     sink_ = gst_bin_get_by_name(GST_BIN(pipeline_), "_xnaut_appsink_");
     if (!sink_) {
-      RCLCPP_FATAL(get_logger(), "Failed to find appsink element in tee pipeline");
+      RCLCPP_FATAL(get_logger(), "Failed to find ROS appsink element in tee pipeline");
       gst_object_unref(pipeline_);
       pipeline_ = NULL;
       return false;
     }
 
-    // Set caps and sync on the appsink
+    // Set caps and sync on the ROS appsink
     GstCaps * caps = NULL;
     // http://gstreamer.freedesktop.org/data/doc/gstreamer/head/pwg/html/section-types-definitions.html
     if (image_encoding_ == sensor_msgs::image_encodings::RGB8) {
@@ -238,6 +317,31 @@ bool GSCam::init_stream()
       gst_caps_unref(caps);
     }
     gst_base_sink_set_sync(GST_BASE_SINK(sink_), sync_sink_ ? TRUE : FALSE);
+
+#ifdef HAVE_GST_RTSP_SERVER
+    if (rtsp_streaming_enabled_) {
+      rtsp_appsink_ = gst_bin_get_by_name(GST_BIN(pipeline_), "_xnaut_rtsp_appsink_");
+      if (!rtsp_appsink_) {
+        RCLCPP_FATAL(get_logger(), "Failed to find RTSP appsink element in tee pipeline");
+        gst_object_unref(sink_);
+        sink_ = NULL;
+        gst_object_unref(pipeline_);
+        pipeline_ = NULL;
+        return false;
+      }
+      // Drop frames rather than queue them when no RTSP client is connected yet.
+      gst_app_sink_set_max_buffers(GST_APP_SINK(rtsp_appsink_), 2);
+      gst_app_sink_set_drop(GST_APP_SINK(rtsp_appsink_), TRUE);
+      gst_base_sink_set_sync(GST_BASE_SINK(rtsp_appsink_), FALSE);
+
+      // Callback drives the appsink → appsrc bridge.
+      GstAppSinkCallbacks rtsp_cb = {};
+      rtsp_cb.new_sample = &GSCam::on_rtsp_new_sample;
+      gst_app_sink_set_callbacks(GST_APP_SINK(rtsp_appsink_), &rtsp_cb, this, NULL);
+
+      setup_rtsp_server();
+    }
+#endif
   } else {
     // Existing behavior: parse the user's pipeline and programmatically append appsink
     pipeline_ = gst_parse_launch(gsconfig_.c_str(), &error);
@@ -532,13 +636,51 @@ void GSCam::publish_stream()
 
 void GSCam::cleanup_stream()
 {
-  // Clean up
   RCLCPP_INFO(get_logger(), "Stopping gstreamer pipeline...");
+
+#ifdef HAVE_GST_RTSP_SERVER
+  if (rtsp_streaming_enabled_) {
+    // Stop the RTSP server's GMainLoop first so no more media-configure callbacks fire.
+    if (rtsp_main_loop_) {
+      g_main_loop_quit(rtsp_main_loop_);
+      rtsp_main_loop_thread_.join();
+      g_main_loop_unref(rtsp_main_loop_);
+      rtsp_main_loop_ = NULL;
+    }
+    if (rtsp_context_) {
+      g_main_context_unref(rtsp_context_);
+      rtsp_context_ = NULL;
+    }
+    // Release the appsrc reference obtained in on_rtsp_media_configure.
+    {
+      std::lock_guard<std::mutex> lock(rtsp_appsrc_mutex_);
+      if (rtsp_appsrc_) {
+        gst_object_unref(rtsp_appsrc_);
+        rtsp_appsrc_ = NULL;
+      }
+    }
+    if (rtsp_server_) {
+      g_object_unref(rtsp_server_);
+      rtsp_server_ = NULL;
+    }
+    // Release the extra ref from gst_bin_get_by_name.
+    if (rtsp_appsink_) {
+      gst_object_unref(rtsp_appsink_);
+      rtsp_appsink_ = NULL;
+    }
+  }
+#endif
+
   if (pipeline_) {
     gst_element_set_state(pipeline_, GST_STATE_NULL);
     // In tee mode sink_ carries an extra ref from gst_bin_get_by_name; release it
     // before the pipeline is destroyed so the refcount reaches zero cleanly.
-    if (udp_streaming_enabled_ && sink_) {
+    const bool need_tee = udp_streaming_enabled_
+#ifdef HAVE_GST_RTSP_SERVER
+      || rtsp_streaming_enabled_
+#endif
+    ;
+    if (need_tee && sink_) {
       gst_object_unref(sink_);
       sink_ = NULL;
     }
@@ -590,6 +732,107 @@ GstFlowReturn gst_new_asample_cb(GstAppSink * appsink, gpointer user_data)
 {
   return GST_FLOW_OK;
 }
+
+// ---------------------------------------------------------------------------
+// RTSP server support
+// ---------------------------------------------------------------------------
+#ifdef HAVE_GST_RTSP_SERVER
+
+void GSCam::setup_rtsp_server()
+{
+  // A dedicated GMainContext + GMainLoop drives the RTSP server's network I/O
+  // in a separate thread, isolated from GStreamer's own default context.
+  rtsp_context_ = g_main_context_new();
+  rtsp_main_loop_ = g_main_loop_new(rtsp_context_, FALSE);
+
+  rtsp_server_ = gst_rtsp_server_new();
+  gst_rtsp_server_set_service(rtsp_server_, std::to_string(rtsp_port_).c_str());
+
+  // The factory pipeline is a single shared pipeline (one instance for all clients).
+  // It sources from an appsrc named "pay_src" and packetizes via rtsp_pay_config_.
+  // Caps on the appsrc must match what rtsp_encode_config_ produces; H264 byte-stream
+  // is the default. Override rtsp_pay_config_ for other codecs.
+  const std::string factory_desc =
+    "( appsrc name=pay_src format=time is-live=true do-timestamp=false"
+    "  caps=\"video/x-h264,stream-format=byte-stream,alignment=au\""
+    "  ! " + rtsp_pay_config_ + " )";
+
+  GstRTSPMediaFactory * factory = gst_rtsp_media_factory_new();
+  gst_rtsp_media_factory_set_launch(factory, factory_desc.c_str());
+  gst_rtsp_media_factory_set_shared(factory, TRUE);  // one pipeline, many viewers
+
+  // When a client connects and the factory pipeline is instantiated, grab the appsrc.
+  g_signal_connect(factory, "media-configure", G_CALLBACK(&GSCam::on_rtsp_media_configure), this);
+
+  GstRTSPMountPoints * mounts = gst_rtsp_server_get_mount_points(rtsp_server_);
+  gst_rtsp_mount_points_add_factory(mounts, rtsp_mount_point_.c_str(), factory);
+  g_object_unref(mounts);
+
+  gst_rtsp_server_attach(rtsp_server_, rtsp_context_);
+
+  rtsp_main_loop_thread_ = std::thread(
+    [this]()
+    {
+      g_main_context_push_thread_default(rtsp_context_);
+      g_main_loop_run(rtsp_main_loop_);
+      g_main_context_pop_thread_default(rtsp_context_);
+    });
+
+  RCLCPP_INFO_STREAM(
+    get_logger(),
+    "RTSP server listening on rtsp://0.0.0.0:" << rtsp_port_ << rtsp_mount_point_);
+}
+
+// Called by the RTSP server (on the GMainLoop thread) when a client connects and the
+// shared factory pipeline is first created.  We retrieve the appsrc so that
+// on_rtsp_new_sample can push encoded frames into it.
+void GSCam::on_rtsp_media_configure(
+  GstRTSPMediaFactory * /*factory*/, GstRTSPMedia * media, gpointer user_data)
+{
+  GSCam * self = static_cast<GSCam *>(user_data);
+
+  GstElement * element = gst_rtsp_media_get_element(media);
+  GstElement * appsrc = gst_bin_get_by_name_recurse_up(GST_BIN(element), "pay_src");
+  gst_object_unref(element);
+
+  std::lock_guard<std::mutex> lock(self->rtsp_appsrc_mutex_);
+  if (self->rtsp_appsrc_) {
+    gst_object_unref(self->rtsp_appsrc_);
+  }
+  self->rtsp_appsrc_ = appsrc;  // may be NULL if name not found
+
+  if (self->rtsp_appsrc_) {
+    RCLCPP_INFO(self->get_logger(), "RTSP client connected — appsrc ready, stream active.");
+  } else {
+    RCLCPP_ERROR(self->get_logger(), "RTSP media-configure: 'pay_src' appsrc not found.");
+  }
+}
+
+// Called by the GStreamer appsink (on the pipeline thread) for every encoded frame.
+// Pushes the buffer into the RTSP server's appsrc if a client is connected.
+GstFlowReturn GSCam::on_rtsp_new_sample(GstAppSink * appsink, gpointer user_data)
+{
+  GSCam * self = static_cast<GSCam *>(user_data);
+
+  GstSample * sample = gst_app_sink_pull_sample(appsink);
+  if (!sample) {
+    return GST_FLOW_OK;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(self->rtsp_appsrc_mutex_);
+    if (self->rtsp_appsrc_) {
+      // Copy the buffer so the appsrc pipeline owns its own memory.
+      GstBuffer * buf = gst_buffer_copy(gst_sample_get_buffer(sample));
+      gst_app_src_push_buffer(GST_APP_SRC(self->rtsp_appsrc_), buf);
+    }
+  }
+
+  gst_sample_unref(sample);
+  return GST_FLOW_OK;
+}
+
+#endif  // HAVE_GST_RTSP_SERVER
 
 }  // namespace gscam
 

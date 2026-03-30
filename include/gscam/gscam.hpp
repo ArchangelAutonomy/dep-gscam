@@ -15,13 +15,22 @@
 #ifndef GSCAM__GSCAM_HPP_
 #define GSCAM__GSCAM_HPP_
 
+#include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 extern "C" {
 #include "gst/gst.h"
 #include "gst/app/gstappsink.h"
+#include "gst/app/gstappsrc.h"
 }
+
+#ifdef HAVE_GST_RTSP_SERVER
+extern "C" {
+#include "gst/rtsp-server/rtsp-server.h"
+}
+#endif
 
 #include "rclcpp/rclcpp.hpp"
 
@@ -52,6 +61,14 @@ private:
   void cleanup_stream();
 
   void run();
+
+#ifdef HAVE_GST_RTSP_SERVER
+  void setup_rtsp_server();
+
+  static void on_rtsp_media_configure(
+    GstRTSPMediaFactory * factory, GstRTSPMedia * media, gpointer user_data);
+  static GstFlowReturn on_rtsp_new_sample(GstAppSink * appsink, gpointer user_data);
+#endif
 
   // General gstreamer configuration
   std::string gsconfig_;
@@ -105,6 +122,27 @@ private:
   // Poll gstreamer on a separate thread
   std::thread pipeline_thread_;
   std::atomic<bool> stop_signal_;
+
+#ifdef HAVE_GST_RTSP_SERVER
+  // RTSP streaming
+  // When rtsp_encode_config is non-empty, a tee branch encodes video into an appsink.
+  // A GstRTSPServer bridges that appsink into an appsrc-based RTSP media factory so
+  // multiple clients can connect to rtsp://<host>:<port><mount_point>.
+  bool rtsp_streaming_enabled_;
+  std::string rtsp_encode_config_;  // tee branch: encode pipeline before internal appsink
+  std::string rtsp_pay_config_;     // RTP packetizer in the RTSP factory (e.g. rtph264pay)
+  int rtsp_port_;
+  std::string rtsp_mount_point_;
+
+  GstElement * rtsp_appsink_;       // appsink in the main tee (capture encoded frames)
+  GstElement * rtsp_appsrc_;        // appsrc inside the RTSP server pipeline (set on connect)
+  std::mutex rtsp_appsrc_mutex_;
+
+  GstRTSPServer * rtsp_server_;
+  GMainContext * rtsp_context_;
+  GMainLoop * rtsp_main_loop_;
+  std::thread rtsp_main_loop_thread_;
+#endif
 };
 
 }  // namespace gscam

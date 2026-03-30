@@ -7,6 +7,7 @@ find_package(PkgConfig)
 
 pkg_check_modules(GSTREAMER REQUIRED gstreamer-1.0)
 pkg_check_modules(GST_APP REQUIRED gstreamer-app-1.0)
+pkg_check_modules(GST_RTSP_SERVER gstreamer-rtsp-server-1.0)
 
 find_package(ament_cmake REQUIRED)
 find_package(class_loader REQUIRED)
@@ -38,6 +39,15 @@ target_link_libraries(gscam
   diagnostic_updater::diagnostic_updater
   camera_calibration_parsers::camera_calibration_parsers
   camera_info_manager::camera_info_manager)
+
+if(GST_RTSP_SERVER_FOUND)
+  message(STATUS "gstreamer-rtsp-server-1.0 found — building with RTSP server support")
+  target_compile_definitions(gscam PRIVATE HAVE_GST_RTSP_SERVER=1)
+  target_include_directories(gscam PRIVATE ${GST_RTSP_SERVER_INCLUDE_DIRS})
+  target_link_libraries(gscam ${GST_RTSP_SERVER_LIBRARIES})
+else()
+  message(STATUS "gstreamer-rtsp-server-1.0 not found — RTSP server support disabled")
+endif()
 
 if(image_transport_VERSION VERSION_LESS 6.3.0)
   target_compile_definitions(gscam
