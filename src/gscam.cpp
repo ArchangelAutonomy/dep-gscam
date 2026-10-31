@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <stdlib.h>
+#include <cstdlib>
 #include <unistd.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
@@ -385,6 +386,30 @@ void GSCam::publish_stream()
     sensor_msgs::msg::CameraInfo::SharedPtr cinfo;
     cinfo.reset(new sensor_msgs::msg::CameraInfo(cur_cinfo));
     if (use_gst_timestamps_) {
+      // The pipeline clock is monotonic, so the offset to ROS time is constant unless the host
+      // clock is stepped. Re-sample it so camera stamps follow a step like every other stamp,
+      // instead of staying on the base sampled at stream start for the rest of the session.
+      GstClock * sys_clock = gst_system_clock_obtain();
+      const int64_t offset_now =
+        now().nanoseconds() - static_cast<int64_t>(GST_TIME_AS_NSECONDS(gst_clock_get_time(sys_clock)));
+      gst_object_unref(sys_clock);
+      // The two clocks are read back to back, so a preempted read looks like a step. Re-base only
+      // when two consecutive frames see the same new offset.
+      if (std::llabs(offset_now - static_cast<int64_t>(time_offset_)) > k_time_offset_step_ns) {
+        if (pending_time_offset_ &&
+          std::llabs(offset_now - *pending_time_offset_) <= k_time_offset_step_ns)
+        {
+          RCLCPP_WARN(
+            get_logger(), "Host clock stepped by %.6f s, re-basing camera stamps",
+            (offset_now - static_cast<int64_t>(time_offset_)) * 1e-9);
+          time_offset_ = offset_now;
+          pending_time_offset_.reset();
+        } else {
+          pending_time_offset_ = offset_now;
+        }
+      } else {
+        pending_time_offset_.reset();
+      }
       cinfo->header.stamp = rclcpp::Time(
         GST_TIME_AS_NSECONDS(buf->pts + bt) + time_offset_ - acquisition_offset_);
     } else {

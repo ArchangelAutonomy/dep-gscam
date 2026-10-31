@@ -15,6 +15,7 @@
 #ifndef GSCAM__GSCAM_HPP_
 #define GSCAM__GSCAM_HPP_
 
+#include <optional>
 #include <stdexcept>
 #include <string>
 
@@ -77,6 +78,10 @@ private:
   // ROS Inteface
   // Calibration between ros::Time and gst timestamps
   uint64_t time_offset_;
+  // Offset change treated as a host clock step rather than sampling jitter
+  static constexpr int64_t k_time_offset_step_ns = 1000000;
+  // Candidate offset seen on the previous frame, awaiting confirmation
+  std::optional<int64_t> pending_time_offset_;
   // Calibration between gst_timestamps and camera shutter timestamps
   int64_t acquisition_offset_;
   camera_info_manager::CameraInfoManager camera_info_manager_;
