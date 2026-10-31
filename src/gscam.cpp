@@ -13,10 +13,10 @@
 // limitations under the License.
 
 #include <stdlib.h>
-#include <cstdlib>
 #include <unistd.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
+#include <cstdlib>
 #include <iostream>
 #include <string>
 
@@ -391,7 +391,8 @@ void GSCam::publish_stream()
       // instead of staying on the base sampled at stream start for the rest of the session.
       GstClock * sys_clock = gst_system_clock_obtain();
       const int64_t offset_now =
-        now().nanoseconds() - static_cast<int64_t>(GST_TIME_AS_NSECONDS(gst_clock_get_time(sys_clock)));
+        now().nanoseconds() -
+        static_cast<int64_t>(GST_TIME_AS_NSECONDS(gst_clock_get_time(sys_clock)));
       gst_object_unref(sys_clock);
       // The two clocks are read back to back, so a preempted read looks like a step. Re-base only
       // when two consecutive frames see the same new offset.
