@@ -81,8 +81,10 @@ private:
   // ROS Inteface
   // Calibration between ros::Time and gst timestamps
   uint64_t time_offset_;
-  // Offset change treated as a host clock step rather than sampling jitter
-  static constexpr int64_t k_time_offset_step_ns = 1000000;
+  // Offset change treated as a host clock step rather than sampling jitter. Above NTP slew too:
+  // at the 500 ppm slew limit the offset drifts 10 ms in 20 s, so a slewing clock re-bases at
+  // most that often instead of every 2 s.
+  static constexpr int64_t k_time_offset_step_ns = 10000000;
   // Candidate offset seen on the previous frame, awaiting confirmation
   std::optional<int64_t> pending_time_offset_;
   // Sim time drives now(), so the offset to the pipeline clock is not expected to be constant
