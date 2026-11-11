@@ -15,6 +15,8 @@
 #ifndef GSCAM__GSCAM_HPP_
 #define GSCAM__GSCAM_HPP_
 
+#include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 
@@ -49,6 +51,8 @@ private:
   bool configure();
   bool init_stream();
   void publish_stream();
+  // Follow a host clock step: re-base time_offset_ once two frames agree on a new offset
+  void rebase_time_offset_on_clock_step();
   void cleanup_stream();
 
   void run();
@@ -77,6 +81,14 @@ private:
   // ROS Inteface
   // Calibration between ros::Time and gst timestamps
   uint64_t time_offset_;
+  // Offset change treated as a host clock step rather than sampling jitter. Above NTP slew too:
+  // at the 500 ppm slew limit the offset drifts 10 ms in 20 s, so a slewing clock re-bases at
+  // most that often instead of every 2 s.
+  static constexpr int64_t k_time_offset_step_ns = 10000000;
+  // Candidate offset seen on the previous frame, awaiting confirmation
+  std::optional<int64_t> pending_time_offset_;
+  // Sim time drives now(), so the offset to the pipeline clock is not expected to be constant
+  bool use_sim_time_ = false;
   // Calibration between gst_timestamps and camera shutter timestamps
   int64_t acquisition_offset_;
   camera_info_manager::CameraInfoManager camera_info_manager_;
